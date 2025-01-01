@@ -1,0 +1,140 @@
+services:
+  data_gen:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile
+    image: lilmonk/data_gen:latest
+    container_name: data_gen
+    user: root
+    env_file:
+      - env/.prod.env
+    networks:
+      - kafka-net
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  stateful_stream_dedup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lilmonk/stateful_stream_dedup:latest
+    container_name: stateful_stream_dedup
+    user: root
+#    command: |
+#      sleep infinity
+    command: |
+      /opt/spark/bin/spark-submit --master "local[*]" --deploy-mode client --class io.lilmonk.JobRunner --conf spark.driver.extraJavaOptions="-Duser.timezone=GMT -Dlog4j.configuration=log4j.properties" --conf spark.executor.extraJavaOptions=-"Duser.timezone=GMT -Dlog4j.configuration=log4j2.properties" --conf spark.sql.session.timeZone=UTC --conf spark.sql.warehouse.dir=file:///tmp/spark-warehouse /opt/spark/jars/StatefulStreamDedup-1.0-SNAPSHOT.jar -e local -c /tmp/application.conf -j KAFKA_STREAM_DEDUP
+    env_file:
+      - env/.prod.env
+    volumes:
+      - "./src/main/resources/application.conf:/tmp/application.conf"
+      - "spark_data:/tmp/spark/"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - kafka-net
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.8.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_SERVERS: zookeeper:2888:3888
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/zookeeper_server_jaas.conf
+        -Dzookeeper.authProvider.1=org.apache.zookeeper.server.auth.SASLAuthenticationProvider
+        -Dzookeeper.allowSaslFailedClients=false
+        -Dzookeeper.requireClientAuthScheme=sasl
+    ports:
+      - "2181:2181"
+    restart: unless-stopped
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+      - ./docker/zookeeper/zookeeper.sasl.jaas.config:/etc/kafka/zookeeper_server_jaas.conf
+    networks:
+      - kafka-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.8.0
+    container_name: kafka
+    user: root
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: SASL_PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:9093,SASL_PLAINTEXT_2://0.0.0.0:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SASL_PLAINTEXT:SASL_PLAINTEXT,INTERNAL:PLAINTEXT,SASL_PLAINTEXT_2:SASL_PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: SASL_PLAINTEXT_2://${KAFKA_HOST:-localhost}:29092,INTERNAL://kafka:9093,SASL_PLAINTEXT://kafka:9092
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_OFFSETS_RETENTION_MINUTES: 172800
+      KAFKA_LOG4J_LOGGERS: "kafka.authorizer.logger=INFO,kafka.controller=INFO"
+      KAFKA_LOG4J_ROOT_LOGLEVEL: "INFO"
+      KAFKA_LOG_DIRS: '/tmp/kafka-logs'
+      CONFLUENT_METRICS_REPORTER_SASL_MECHANISM: SCRAM-SHA-256
+      CONFLUENT_METRICS_REPORTER_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONFLUENT_METRICS_REPORTER_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required \
+                    username=\"client\" \
+                    password=\"client-secret\";"
+      KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf"
+      #      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${KAFKA_HOST}:9092,INTERNAL://kafka:9093
+      #      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:9093
+      #      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      #      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+    ports:
+      - "29092:9092"
+    restart: unless-stopped
+    volumes:
+      - kafka_data:/tmp/kafka-logs
+      - ./docker/kafka/kafka.jaas.conf:/etc/kafka/kafka_server_jaas.conf
+      - ./docker/client.properties:/tmp/client.properties
+    networks:
+      - kafka-net
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.8.0
+    hostname: kafka-init
+    container_name: kafka-init
+    depends_on:
+      - kafka
+    environment:
+      ZOOKEEPER_CONNECT: zookeeper:2181
+    volumes:
+      - ./docker/kafka/init-kafka.sh:/scripts/init-kafka.sh
+    entrypoint: [ "/bin/bash", "/scripts/init-kafka.sh" ]
+    networks:
+      - kafka-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka-init
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - kafka-net
+
+volumes:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_data:
+  spark_data:
+
+networks:
+  kafka-net:
+    driver: bridge
