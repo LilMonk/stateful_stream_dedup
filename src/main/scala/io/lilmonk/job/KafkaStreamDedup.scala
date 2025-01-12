@@ -49,9 +49,9 @@ object KafkaStreamDedup {
 
     val deduplicatedStream = parsedStream
       .dropDuplicates("sensor_id", "timestamp")
-      .groupByKey(record => record.sensor_id) // Group by VIN
+      .groupByKey(record => record.sensor_id)
       .flatMapGroupsWithState[DeduplicationState, SensorData](OutputMode.Append(), GroupStateTimeout.NoTimeout()) {
-        case (vin, records, state) =>
+        case (sensor_id, records, state) =>
           // Get the latest timestamp from state
           val latestTimestamp = state.getOption.map(_.latestTimestamp).getOrElse(DEFAULT_TIMESTAMP)
 
